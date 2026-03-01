@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import { useRouter } from "next/navigation";
 
 interface StatusUpdate {
@@ -21,34 +21,69 @@ export function ProgressTracker({ jobId }: { jobId: string }) {
     completedQueries: 0,
     totalQueries: 0,
   });
+  const [reconnecting, setReconnecting] = useState(false);
+  const reconnectAttempts = useRef(0);
+  const maxReconnects = 10; // Allow up to 10 reconnects (50 minutes total)
 
   useEffect(() => {
-    const eventSource = new EventSource(`/api/aeo/status/${jobId}`);
+    let eventSource: EventSource | null = null;
+    let reconnectTimeout: NodeJS.Timeout | null = null;
 
-    eventSource.onmessage = (event) => {
-      const data: StatusUpdate = JSON.parse(event.data);
-      setStatus(data);
+    const connect = () => {
+      eventSource = new EventSource(`/api/aeo/status/${jobId}`);
+      setReconnecting(false);
 
-      if (data.status === "completed" || data.status === "failed") {
-        eventSource.close();
-        if (data.status === "completed") {
-          // Refresh the page to show results
-          router.refresh();
+      eventSource.onmessage = (event) => {
+        const data: StatusUpdate = JSON.parse(event.data);
+        setStatus(data);
+        reconnectAttempts.current = 0; // Reset on successful message
+
+        // Check if this is a timeout message - auto reconnect
+        if (data.currentStep?.includes("Timeout") || data.currentStep?.includes("refresh")) {
+          eventSource?.close();
+          setReconnecting(true);
+          reconnectTimeout = setTimeout(() => {
+            if (reconnectAttempts.current < maxReconnects) {
+              reconnectAttempts.current++;
+              connect();
+            }
+          }, 2000); // Wait 2 seconds before reconnecting
+          return;
         }
-      }
+
+        if (data.status === "completed" || data.status === "failed") {
+          eventSource?.close();
+          if (data.status === "completed") {
+            router.refresh();
+          }
+        }
+      };
+
+      eventSource.onerror = () => {
+        eventSource?.close();
+        // Auto-reconnect on error if not completed
+        if (status.status !== "completed" && status.status !== "failed") {
+          setReconnecting(true);
+          reconnectTimeout = setTimeout(() => {
+            if (reconnectAttempts.current < maxReconnects) {
+              reconnectAttempts.current++;
+              connect();
+            }
+          }, 3000);
+        }
+      };
     };
 
-    eventSource.onerror = () => {
-      eventSource.close();
-    };
+    connect();
 
     return () => {
-      eventSource.close();
+      eventSource?.close();
+      if (reconnectTimeout) clearTimeout(reconnectTimeout);
     };
-  }, [jobId, router]);
+  }, [jobId, router, status.status]);
 
   const isComplete = status.status === "completed";
-  const isFailed = status.status === "failed";
+  const isFailed = status.status === "failed" && !reconnecting;
 
   return (
     <div className="bg-white border-2 border-[#1a1a1a] rounded-2xl p-8 shadow-[6px_6px_0px_0px_#1a1a1a]">
@@ -58,9 +93,15 @@ export function ProgressTracker({ jobId }: { jobId: string }) {
             ? "Analysis Complete!"
             : isFailed
             ? "Analysis Failed"
+            : reconnecting
+            ? "Reconnecting..."
             : "Analyzing AI Visibility..."}
         </h2>
-        <p className="text-[#6b6b6b]">{status.currentStep}</p>
+        <p className="text-[#6b6b6b]">
+          {reconnecting
+            ? `Continuing from ${status.progress}%... (attempt ${reconnectAttempts.current}/${maxReconnects})`
+            : status.currentStep}
+        </p>
       </div>
 
       {/* Progress Bar */}
@@ -72,7 +113,7 @@ export function ProgressTracker({ jobId }: { jobId: string }) {
         <div className="h-4 bg-[#f5f5f5] border-2 border-[#1a1a1a] rounded-full overflow-hidden">
           <div
             className={`h-full transition-all duration-500 ${
-              isFailed ? "bg-[#EF4444]" : "bg-[#DFFE68]"
+              isFailed ? "bg-[#EF4444]" : reconnecting ? "bg-[#F59E0B]" : "bg-[#DFFE68]"
             }`}
             style={{ width: `${status.progress}%` }}
           />
@@ -117,11 +158,22 @@ export function ProgressTracker({ jobId }: { jobId: string }) {
             {[0, 1, 2].map((i) => (
               <div
                 key={i}
-                className="w-3 h-3 bg-[#DFFE68] border-2 border-[#1a1a1a] rounded-full animate-bounce"
+                className={`w-3 h-3 border-2 border-[#1a1a1a] rounded-full animate-bounce ${
+                  reconnecting ? "bg-[#F59E0B]" : "bg-[#DFFE68]"
+                }`}
                 style={{ animationDelay: `${i * 0.15}s` }}
               />
             ))}
           </div>
+        </div>
+      )}
+
+      {/* Reconnecting notice */}
+      {reconnecting && (
+        <div className="mt-6 p-4 bg-[#F59E0B]/10 border-2 border-[#F59E0B] rounded-lg text-center">
+          <p className="text-sm text-[#F59E0B] font-medium">
+            Bright Data scraping takes time. Auto-reconnecting to continue...
+          </p>
         </div>
       )}
     </div>
