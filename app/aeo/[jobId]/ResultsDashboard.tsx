@@ -26,7 +26,7 @@ interface ResultsData {
   competitorScores: Record<string, { score: number; [key: string]: unknown }>;
   topCitations: [string, number][];
   recommendations: string[];
-  sampleResponses: Array<{ engine: string; query: string; response: string }>;
+  sampleResponses: Array<{ engine: string; query: string; queryType?: string; response: string }>;
 }
 
 export function ResultsDashboard({ jobId }: { jobId: string }) {

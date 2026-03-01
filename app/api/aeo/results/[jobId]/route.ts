@@ -50,14 +50,14 @@ export async function GET(
       (report.topCitations || []) as [string, number][]
     );
 
-    // Get sample responses (up to 3)
-    const sampleResponses = responses
+    // Get all responses with query types
+    const allSampleResponses = responses
       .filter(r => r.responseText)
-      .slice(0, 3)
       .map(r => ({
         engine: r.engine,
         query: r.query,
-        response: r.responseText?.slice(0, 500) + (r.responseText && r.responseText.length > 500 ? '...' : ''),
+        queryType: r.queryType,
+        response: r.responseText || '',
       }));
 
     // Determine if results are gated
@@ -106,8 +106,8 @@ export async function GET(
         : recommendations,
 
       sampleResponses: isGated
-        ? sampleResponses.slice(0, 1)
-        : sampleResponses,
+        ? allSampleResponses.slice(0, 3)
+        : allSampleResponses,
 
       // Metadata
       totalQueries: responses.length,
