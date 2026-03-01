@@ -197,23 +197,30 @@ export async function GET(
           where: eq(aeoAnalyses.reportId, jobId),
         });
 
-        const allResponses = await db.query.aeoResponses.findMany({
-          where: and(
-            eq(aeoResponses.reportId, jobId),
-            isNull(aeoResponses.error)
-          ),
+        // Fetch ALL responses for the lookup map (including those with errors)
+        const allResponsesForMap = await db.query.aeoResponses.findMany({
+          where: eq(aeoResponses.reportId, jobId),
         });
 
-        const analysisResults: ResponseAnalysis[] = allAnalyses.map(a => ({
-          engine: '',
-          query: '',
-          queryType: '',
-          mentions: (a.mentions || []) as ResponseAnalysis['mentions'],
-          citations: (a.parsedCitations || []) as ResponseAnalysis['citations'],
-          companyMentioned: a.companyMentioned,
-          companyPosition: a.companyPosition,
-          companySentiment: a.companySentiment as ResponseAnalysis['companySentiment'],
-        }));
+        // Create response lookup map for joining with analyses
+        const responseMap = new Map(allResponsesForMap.map(r => [r.id, r]));
+
+        // Fetch only successful responses for competitor scoring
+        const allResponses = allResponsesForMap.filter(r => !r.error);
+
+        const analysisResults: ResponseAnalysis[] = allAnalyses.map(a => {
+          const response = responseMap.get(a.responseId);
+          return {
+            engine: response?.engine || '',
+            query: response?.query || '',
+            queryType: response?.queryType || '',
+            mentions: (a.mentions || []) as ResponseAnalysis['mentions'],
+            citations: (a.parsedCitations || []) as ResponseAnalysis['citations'],
+            companyMentioned: a.companyMentioned,
+            companyPosition: a.companyPosition,
+            companySentiment: a.companySentiment as ResponseAnalysis['companySentiment'],
+          };
+        });
 
         const visibilityScore = calculateVisibilityScore(analysisResults);
         const engineScores = calculateEngineScores(analysisResults, report.engines as string[]);
