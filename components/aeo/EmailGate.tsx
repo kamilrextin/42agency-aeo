@@ -1,16 +1,15 @@
 "use client";
 
 import { useState } from "react";
-import { useRouter } from "next/navigation";
 
 interface EmailGateProps {
   jobId: string;
   company: string;
   score: number;
+  onUnlock?: () => void;
 }
 
-export function EmailGate({ jobId, company, score }: EmailGateProps) {
-  const router = useRouter();
+export function EmailGate({ jobId, company, score, onUnlock }: EmailGateProps) {
   const [email, setEmail] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -32,8 +31,10 @@ export function EmailGate({ jobId, company, score }: EmailGateProps) {
         throw new Error(data.error || "Failed to unlock results");
       }
 
-      // Refresh the page to show unlocked results
-      router.refresh();
+      // Call the onUnlock callback to refresh data
+      if (onUnlock) {
+        onUnlock();
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Something went wrong");
       setIsLoading(false);

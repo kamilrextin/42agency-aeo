@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { ScoreCard } from "@/components/aeo/ScoreCard";
 import { EngineBreakdown } from "@/components/aeo/EngineBreakdown";
 import { CompetitorComparison } from "@/components/aeo/CompetitorComparison";
@@ -34,24 +34,30 @@ export function ResultsDashboard({ jobId }: { jobId: string }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    async function fetchResults() {
-      try {
-        const response = await fetch(`/api/aeo/results/${jobId}`);
-        if (!response.ok) {
-          throw new Error("Failed to fetch results");
-        }
-        const results = await response.json();
-        setData(results);
-      } catch (err) {
-        setError(err instanceof Error ? err.message : "Unknown error");
-      } finally {
-        setLoading(false);
+  const fetchResults = useCallback(async () => {
+    try {
+      setLoading(true);
+      const response = await fetch(`/api/aeo/results/${jobId}`);
+      if (!response.ok) {
+        throw new Error("Failed to fetch results");
       }
+      const results = await response.json();
+      setData(results);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unknown error");
+    } finally {
+      setLoading(false);
     }
-
-    fetchResults();
   }, [jobId]);
+
+  useEffect(() => {
+    fetchResults();
+  }, [fetchResults]);
+
+  const handleUnlock = async () => {
+    // Re-fetch results after unlock
+    await fetchResults();
+  };
 
   if (loading) {
     return (
@@ -85,6 +91,7 @@ export function ResultsDashboard({ jobId }: { jobId: string }) {
           jobId={jobId}
           company={data.company}
           score={data.visibilityScore}
+          onUnlock={handleUnlock}
         />
       )}
 
