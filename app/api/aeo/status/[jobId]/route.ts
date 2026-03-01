@@ -12,7 +12,7 @@ import {
 } from '@/lib/aeo/analyzer';
 
 export const runtime = 'edge';
-export const maxDuration = 300; // 5 minutes max
+export const maxDuration = 300;
 
 interface StatusUpdate {
   status: 'pending' | 'running' | 'completed' | 'failed';
@@ -29,7 +29,6 @@ export async function GET(
 ) {
   const { jobId } = await params;
 
-  // Create SSE stream
   const encoder = new TextEncoder();
   const stream = new ReadableStream({
     async start(controller) {
@@ -37,8 +36,10 @@ export async function GET(
         controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`));
       };
 
+      const startTime = Date.now();
+      const MAX_RUNTIME_MS = 280000; // 280 seconds - leave buffer before 300s timeout
+
       try {
-        // Get report
         const report = await db.query.aeoReports.findFirst({
           where: eq(aeoReports.id, jobId),
         });
@@ -49,7 +50,6 @@ export async function GET(
           return;
         }
 
-        // If already completed, return immediately
         if (report.status === 'completed') {
           send({ status: 'completed', progress: 100, currentStep: 'Analysis complete', completedQueries: 0, totalQueries: 0 });
           controller.close();
@@ -62,7 +62,6 @@ export async function GET(
           return;
         }
 
-        // Get all pending responses
         const responses = await db.query.aeoResponses.findMany({
           where: eq(aeoResponses.reportId, jobId),
         });
@@ -78,88 +77,111 @@ export async function GET(
           totalQueries,
         });
 
-        // Poll pending responses
+        // Get pending responses
         const pendingResponses = responses.filter(r => r.snapshotId && !r.responseText && !r.error);
 
-        for (const response of pendingResponses) {
-          if (!response.snapshotId) continue;
+        // Poll in batches of 5 concurrently
+        const BATCH_SIZE = 5;
+        const MAX_POLL_ATTEMPTS = 30; // 30 * 3s = 90 seconds max per response
+        const POLL_INTERVAL_MS = 3000;
 
-          let attempts = 0;
-          const maxAttempts = 60;
+        for (let i = 0; i < pendingResponses.length; i += BATCH_SIZE) {
+          // Check timeout
+          if (Date.now() - startTime > MAX_RUNTIME_MS) {
+            send({
+              status: 'running',
+              progress: Math.round((completedQueries / totalQueries) * 100),
+              currentStep: 'Timeout - refresh to continue polling...',
+              completedQueries,
+              totalQueries,
+            });
+            controller.close();
+            return;
+          }
 
-          while (attempts < maxAttempts) {
-            attempts++;
+          const batch = pendingResponses.slice(i, i + BATCH_SIZE);
 
-            const progress = await pollProgress(response.snapshotId);
+          // Process batch in parallel
+          await Promise.all(batch.map(async (response) => {
+            if (!response.snapshotId) return;
 
-            if (progress.status === 'ready') {
-              // Get snapshot data
-              const { data, error } = await getSnapshot(response.snapshotId);
+            for (let attempt = 0; attempt < MAX_POLL_ATTEMPTS; attempt++) {
+              // Check timeout inside loop too
+              if (Date.now() - startTime > MAX_RUNTIME_MS) return;
 
-              const scraperResponse = parseScraperResponse(
-                response.engine,
-                response.query,
-                response.snapshotId,
-                data,
-                error
-              );
+              const progress = await pollProgress(response.snapshotId);
 
-              // Update response in database
-              await db.update(aeoResponses)
-                .set({
-                  responseText: scraperResponse.response,
-                  citations: scraperResponse.citations,
-                  hyperlinks: scraperResponse.hyperlinks,
-                  rawResponse: scraperResponse.rawData,
-                  error: scraperResponse.error,
-                  scrapedAt: new Date(),
-                })
-                .where(eq(aeoResponses.id, response.id));
+              if (progress.status === 'ready') {
+                const { data, error } = await getSnapshot(response.snapshotId);
 
-              // Analyze response if we got text
-              if (scraperResponse.response) {
-                const analysis = analyzeResponse(
-                  scraperResponse,
-                  report.company,
-                  report.competitors as string[],
-                  response.queryType
+                const scraperResponse = parseScraperResponse(
+                  response.engine,
+                  response.query,
+                  response.snapshotId,
+                  data,
+                  error
                 );
 
-                await db.insert(aeoAnalyses).values({
-                  responseId: response.id,
-                  reportId: report.id,
-                  companyMentioned: analysis.companyMentioned,
-                  companyPosition: analysis.companyPosition,
-                  companySentiment: analysis.companySentiment,
-                  mentions: analysis.mentions,
-                  parsedCitations: analysis.citations,
-                });
+                await db.update(aeoResponses)
+                  .set({
+                    responseText: scraperResponse.response,
+                    citations: scraperResponse.citations,
+                    hyperlinks: scraperResponse.hyperlinks,
+                    rawResponse: scraperResponse.rawData,
+                    error: scraperResponse.error,
+                    scrapedAt: new Date(),
+                  })
+                  .where(eq(aeoResponses.id, response.id));
+
+                if (scraperResponse.response) {
+                  const analysis = analyzeResponse(
+                    scraperResponse,
+                    report.company,
+                    report.competitors as string[],
+                    response.queryType
+                  );
+
+                  await db.insert(aeoAnalyses).values({
+                    responseId: response.id,
+                    reportId: report.id,
+                    companyMentioned: analysis.companyMentioned,
+                    companyPosition: analysis.companyPosition,
+                    companySentiment: analysis.companySentiment,
+                    mentions: analysis.mentions,
+                    parsedCitations: analysis.citations,
+                  });
+                }
+
+                completedQueries++;
+                return;
               }
 
-              completedQueries++;
-              send({
-                status: 'running',
-                progress: Math.round((completedQueries / totalQueries) * 100),
-                currentStep: `Processed ${completedQueries}/${totalQueries} queries`,
-                completedQueries,
-                totalQueries,
-              });
+              if (progress.status === 'failed') {
+                await db.update(aeoResponses)
+                  .set({ error: progress.message || 'Scrape failed' })
+                  .where(eq(aeoResponses.id, response.id));
+                completedQueries++;
+                return;
+              }
 
-              break;
+              await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL_MS));
             }
 
-            if (progress.status === 'failed') {
-              await db.update(aeoResponses)
-                .set({ error: progress.message || 'Scrape failed' })
-                .where(eq(aeoResponses.id, response.id));
+            // Max attempts reached - mark as timeout
+            await db.update(aeoResponses)
+              .set({ error: 'Polling timeout' })
+              .where(eq(aeoResponses.id, response.id));
+            completedQueries++;
+          }));
 
-              completedQueries++;
-              break;
-            }
-
-            // Wait before next poll
-            await new Promise(resolve => setTimeout(resolve, 5000));
-          }
+          // Send progress update after each batch
+          send({
+            status: 'running',
+            progress: Math.round((completedQueries / totalQueries) * 100),
+            currentStep: `Processed ${completedQueries}/${totalQueries} queries`,
+            completedQueries,
+            totalQueries,
+          });
         }
 
         // Calculate final scores
@@ -171,12 +193,10 @@ export async function GET(
           totalQueries,
         });
 
-        // Fetch all analyses
         const allAnalyses = await db.query.aeoAnalyses.findMany({
           where: eq(aeoAnalyses.reportId, jobId),
         });
 
-        // Fetch all responses for competitor analysis
         const allResponses = await db.query.aeoResponses.findMany({
           where: and(
             eq(aeoResponses.reportId, jobId),
@@ -184,7 +204,6 @@ export async function GET(
           ),
         });
 
-        // Convert to ResponseAnalysis format
         const analysisResults: ResponseAnalysis[] = allAnalyses.map(a => ({
           engine: '',
           query: '',
@@ -196,11 +215,9 @@ export async function GET(
           companySentiment: a.companySentiment as ResponseAnalysis['companySentiment'],
         }));
 
-        // Calculate scores
         const visibilityScore = calculateVisibilityScore(analysisResults);
         const engineScores = calculateEngineScores(analysisResults, report.engines as string[]);
 
-        // For competitor scores, we need the raw responses
         const scraperResponses = allResponses.map(r => ({
           engine: r.engine,
           prompt: r.query,
@@ -223,7 +240,6 @@ export async function GET(
 
         const topCitations = aggregateCitations(analysisResults);
 
-        // Update report with final scores
         await db.update(aeoReports)
           .set({
             status: 'completed',
@@ -259,7 +275,6 @@ export async function GET(
           error: error instanceof Error ? error.message : 'Unknown error',
         });
 
-        // Update report status
         await db.update(aeoReports)
           .set({
             status: 'failed',
